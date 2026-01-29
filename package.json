@@ -1,0 +1,30 @@
+{
+  "name": "mansion-map-backend",
+  "version": "1.0.0",
+  "description": "Tokyo New Mansion Map Portal Backend API",
+  "main": "index.js",
+  "scripts": {
+    "dev": "netlify dev",
+    "build": "tsc",
+    "lint": "eslint src --ext .ts",
+    "crawl": "ts-node src/crawler/index.ts"
+  },
+  "dependencies": {
+    "@netlify/functions": "^2.8.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "puppeteer-core": "^22.0.0",
+    "@sparticuz/chromium": "^122.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/dotenv": "^8.2.0",
+    "@types/node": "^20.14.2",
+    "typescript": "^5.4.5",
+    "ts-node": "^10.9.2",
+    "netlify-cli": "^17.23.0"
+  }
+}
