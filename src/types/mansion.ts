@@ -5,6 +5,7 @@ export interface Mansion {
   nameJa: string;
   address: string;
   addressJa: string;
+  ward?: string; // 도쿄 23구 중 하나
   latitude: number;
   longitude: number;
 

@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import type { Mansion, StationAccess } from '../types';
 import { extractWardFromAddress } from '../utils/ward';
 
-// Supabase 클라이언트 초기화
+// Supabase 클라이언트 초기화 (읽기 전용 - anon key)
 const getSupabaseClient = () => {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
@@ -12,6 +12,24 @@ const getSupabaseClient = () => {
   }
 
   return createClient(supabaseUrl, supabaseAnonKey);
+};
+
+// Supabase 관리자 클라이언트 초기화 (쓰기 작업 - service role key)
+// RLS를 우회하여 크롤러에서 데이터를 저장할 때 사용
+const getSupabaseAdminClient = () => {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !supabaseServiceKey) {
+    throw new Error('Supabase admin credentials are not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.');
+  }
+
+  return createClient(supabaseUrl, supabaseServiceKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
 };
 
 // 데이터베이스에서 맨션 데이터를 Mansion 타입으로 변환
@@ -294,9 +312,10 @@ export const fetchMansionsInBoundsFromDB = async (
 };
 
 // 맨션 데이터를 Supabase에 저장
+// Service Role Key를 사용하여 RLS를 우회
 export const saveMansionToDB = async (mansion: Partial<Mansion>): Promise<string | null> => {
   try {
-    const supabase = getSupabaseClient();
+    const supabase = getSupabaseAdminClient();
 
     // 구 정보 추출
     const ward = mansion.addressJa ? extractWardFromAddress(mansion.addressJa) : null;

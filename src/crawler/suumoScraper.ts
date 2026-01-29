@@ -13,86 +13,61 @@ interface ScrapeResult {
   nextPageUrl: string | null;
 }
 
-// 가격 문자열 파싱 (예: "5,980万円" -> 5980, "1億7380万円" -> 17380, "6億円" -> 60000)
+interface MansionBasicInfo {
+  name: string;
+  price: string;
+  access: string;
+  sourceUrl: string;
+  thumbnailUrl: string;
+}
+
+// 가격 문자열 파싱 (예: "5,980万円" -> 5980, "1億7380万円" -> 17380)
 const parsePrice = (priceStr: string): number => {
   if (!priceStr) return 0;
-  
-  // 億円 처리 (예: "1億7380万円" -> 17380)
+
   const okuMatch = priceStr.match(/([0-9,]+)億/);
-  const manMatch = priceStr.match(/([0-9,]+)万円/);
-  
-  let oku = 0;
-  let man = 0;
-  
+  const manMatch = priceStr.match(/([0-9,]+)万/);
+
+  let total = 0;
+
   if (okuMatch) {
-    oku = parseInt(okuMatch[1].replace(/,/g, ''), 10) * 10000;
+    total += parseInt(okuMatch[1].replace(/,/g, ''), 10) * 10000;
   }
-  
+
   if (manMatch) {
-    man = parseInt(manMatch[1].replace(/,/g, ''), 10);
+    total += parseInt(manMatch[1].replace(/,/g, ''), 10);
   }
-  
-  // 億円만 있는 경우 (예: "6億円")
-  if (oku > 0 && man === 0 && priceStr.includes('億円')) {
-    return oku;
-  }
-  
-  // 万円만 있는 경우
-  if (oku === 0 && man > 0) {
-    return man;
-  }
-  
-  // 둘 다 있는 경우
-  if (oku > 0 && man > 0) {
-    return oku + man;
-  }
-  
-  // 일반 숫자만 있는 경우
-  const numMatch = priceStr.match(/([0-9,]+)/);
-  if (numMatch) {
-    return parseInt(numMatch[1].replace(/,/g, ''), 10);
-  }
-  
-  return 0;
+
+  return total;
 };
 
-// 면적 문자열 파싱 (예: "65.32m²" -> 65.32)
-const parseArea = (areaStr: string): number => {
-  const match = areaStr.match(/([0-9.]+)/);
-  if (match) {
-    return parseFloat(match[1]);
-  }
-  return 0;
-};
-
-// 도보 시간 파싱 (예: "徒歩5分" -> 5)
-const parseWalkMinutes = (walkStr: string): number => {
-  const match = walkStr.match(/徒歩(\d+)分/);
-  if (match) {
-    return parseInt(match[1], 10);
-  }
-  return 0;
-};
-
-// 교통 정보 파싱
+// 교통 정보 파싱 (예: "都営大江戸線/勝どき 徒歩15分")
 const parseStationAccess = (accessStr: string): StationAccess[] => {
   const stations: StationAccess[] = [];
-  // 예: "東京メトロ銀座線 「銀座」駅 徒歩3分"
-  const pattern = /(.+?)\s*[「『](.+?)[」』]駅\s*徒歩(\d+)分/g;
-  let match;
-  while ((match = pattern.exec(accessStr)) !== null) {
-    stations.push({
-      lineName: match[1].trim(),
-      stationName: match[2].trim(),
-      walkMinutes: parseInt(match[3], 10),
-    });
+
+  // 패턴: "노선/역명 徒歩N分" 또는 "노선「역명」駅 徒歩N分"
+  const patterns = [
+    /(.+?)\/(.+?)\s+徒歩(\d+)分/g,
+    /(.+?)\s*[「『](.+?)[」』]駅\s*徒歩(\d+)分/g,
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(accessStr)) !== null) {
+      stations.push({
+        lineName: match[1].trim(),
+        stationName: match[2].trim(),
+        walkMinutes: parseInt(match[3], 10),
+      });
+    }
   }
+
   return stations;
 };
 
 // 맨션 ID 생성
-const generateId = (name: string, address: string): string => {
-  const str = `${name}-${address}`;
+const generateId = (name: string, sourceUrl: string): string => {
+  const str = `${name}-${sourceUrl}`;
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
@@ -102,518 +77,368 @@ const generateId = (name: string, address: string): string => {
   return Math.abs(hash).toString(36);
 };
 
-// Puppeteer를 사용하여 페이지 로드 (JavaScript 실행 후 HTML 가져오기)
-const loadPageWithPuppeteer = async (url: string): Promise<string> => {
-  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
-  try {
-    // 로컬 환경에서는 시스템 Chrome 사용, 서버 환경에서는 chromium 사용
-    const isLocal = process.env.NODE_ENV !== 'production' && !process.env.AWS_LAMBDA_FUNCTION_NAME;
-    
-    if (isLocal) {
-      // 로컬: 여러 Chrome 경로 시도
-      const possibleChromePaths = [
-        process.env.PUPPETEER_EXECUTABLE_PATH,
-        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', // macOS
-        '/usr/bin/google-chrome', // Linux
-        '/usr/bin/chromium-browser', // Linux
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', // Windows
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe', // Windows
-      ].filter(Boolean) as string[];
-      
-      let browserLaunched = false;
-      let lastError: Error | null = null;
-      
-      for (const chromePath of possibleChromePaths) {
-        try {
-          browser = await puppeteer.launch({
-            headless: true,
-            executablePath: chromePath,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-          });
-          browserLaunched = true;
-          console.log(`  Chrome 경로 사용: ${chromePath}`);
-          break;
-        } catch (error: any) {
-          lastError = error;
-          continue;
-        }
-      }
-      
-      if (!browserLaunched) {
-        // executablePath 없이 시도 (시스템 PATH에서 찾기)
-        try {
-          browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-          });
-          browserLaunched = true;
-          console.log(`  시스템 PATH에서 Chrome 찾음`);
-        } catch (error: any) {
-          lastError = error;
-        }
-      }
-      
-      if (!browserLaunched) {
-        throw new Error(`Chrome을 찾을 수 없습니다. PUPPETEER_EXECUTABLE_PATH 환경 변수를 설정하거나 Chrome을 설치하세요. 마지막 오류: ${lastError?.message}`);
-      }
-    } else {
-      // 서버: Chromium 사용
-      const headlessValue = chromium.headless === 'chrome-headless-shell' ? true : (chromium.headless === true);
-      browser = await puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: headlessValue,
-      });
-    }
+// 브라우저 인스턴스 생성 (재사용을 위해 분리)
+let browserInstance: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
 
-    if (!browser) {
-      throw new Error('브라우저를 시작할 수 없습니다.');
-    }
+const getBrowser = async () => {
+  if (browserInstance) return browserInstance;
 
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1920, height: 1080 });
-    
-    console.log(`  Puppeteer로 페이지 로드 중: ${url}`);
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-    
-    // 추가 대기 (동적 콘텐츠 로드 대기)
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    const html = await page.content();
-    await browser.close();
-    
-    return html;
-  } catch (error) {
-    if (browser) {
-      await browser.close();
+  const isLocal = process.env.NODE_ENV !== 'production' && !process.env.AWS_LAMBDA_FUNCTION_NAME;
+
+  if (isLocal) {
+    const possibleChromePaths = [
+      process.env.PUPPETEER_EXECUTABLE_PATH,
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/usr/bin/google-chrome',
+      '/usr/bin/chromium-browser',
+    ].filter(Boolean) as string[];
+
+    for (const chromePath of possibleChromePaths) {
+      try {
+        browserInstance = await puppeteer.launch({
+          headless: true,
+          executablePath: chromePath,
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        });
+        console.log(`✓ Chrome 경로: ${chromePath}`);
+        return browserInstance;
+      } catch {
+        continue;
+      }
     }
-    throw error;
+    throw new Error('Chrome을 찾을 수 없습니다.');
+  } else {
+    const headlessValue = chromium.headless === 'chrome-headless-shell' ? true : (chromium.headless === true);
+    browserInstance = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: headlessValue,
+    });
+    return browserInstance;
   }
 };
 
-export const scrapeSuumoListPage = async (url: string): Promise<ScrapeResult> => {
-  const mansions: Partial<Mansion>[] = [];
+const closeBrowser = async () => {
+  if (browserInstance) {
+    await browserInstance.close();
+    browserInstance = null;
+  }
+};
+
+// Puppeteer로 페이지 로드
+const loadPageWithPuppeteer = async (url: string): Promise<string> => {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
 
   try {
-    let html: string;
-    
-    // 먼저 Puppeteer로 시도 (JavaScript 동적 로드 필요)
-    try {
-      html = await loadPageWithPuppeteer(url);
-      console.log(`  Puppeteer로 페이지 로드 완료. HTML 길이: ${html.length} bytes`);
-    } catch (puppeteerError: any) {
-      console.warn(`  Puppeteer 실패, axios로 시도: ${puppeteerError.message}`);
-      // Puppeteer 실패 시 axios로 폴백
-      const response = await axios.get(url, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
-        },
-        timeout: 30000,
-      });
-      html = response.data;
-      console.log(`  Axios로 페이지 로드 완료. HTML 길이: ${html.length} bytes`);
-    }
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(resolve => setTimeout(resolve, 1500));
 
+    const html = await page.content();
+    return html;
+  } finally {
+    await page.close();
+  }
+};
+
+// 목록 페이지에서 기본 정보 추출
+export const scrapeSuumoListPage = async (url: string): Promise<ScrapeResult> => {
+  const mansionInfos: MansionBasicInfo[] = [];
+
+  try {
+    const html = await loadPageWithPuppeteer(url);
     const $ = cheerio.load(html);
 
-    // 디버깅: 페이지 구조 확인
-    console.log(`  페이지 로드 완료. HTML 길이: ${html.length} bytes`);
-    
-    // SUUMO 실제 구조에 맞는 선택자 시도
-    // 실제로는 .propertybox-object가 맨션 카드 컨테이너
-    let selectors = [
-      '.propertybox-object',             // 실제 SUUMO 구조
-      '.cassettebox',                    // 대안 선택자
-      '.propertyitem',                  // 대안 선택자
-      'article.propertybox-object',      // 더 구체적
-      '[class*="propertybox"]',          // propertybox 포함
-    ];
+    console.log(`  페이지 로드 완료. HTML: ${html.length} bytes`);
 
-    let foundElements = 0;
-    let selectorUsed = '';
+    // a.propertybox 선택자로 맨션 카드 찾기
+    const propertyLinks = $('a.propertybox');
+    console.log(`  a.propertybox 요소: ${propertyLinks.length}개`);
 
-    for (const selector of selectors) {
-      const elements = $(selector);
-      if (elements.length > 0) {
-        foundElements = elements.length;
-        selectorUsed = selector;
-        console.log(`  선택자 "${selector}"로 ${foundElements}개 요소 발견`);
-        
-        // 첫 번째 요소의 HTML 구조 확인 (디버깅)
-        if (foundElements > 0) {
-          const firstElement = $(elements[0]);
-          const htmlSample = firstElement.html()?.substring(0, 300) || '';
-          console.log(`  첫 번째 요소 HTML 샘플: ${htmlSample}...`);
-          console.log(`  첫 번째 요소 텍스트: ${firstElement.text().substring(0, 200)}...`);
-        }
-        break;
-      }
-    }
-
-    if (foundElements === 0) {
-      console.warn('  ⚠️  맨션 목록 요소를 찾을 수 없습니다.');
-      console.warn('  페이지 구조를 확인하세요.');
-      
-      // 페이지의 주요 클래스명 찾기
-      const allClasses: string[] = [];
-      $('[class]').each((_, el) => {
-        const classes = $(el).attr('class')?.split(/\s+/) || [];
-        allClasses.push(...classes);
-      });
-      const uniqueClasses = [...new Set(allClasses)].filter(c => 
-        c.includes('cassette') || 
-        c.includes('property') || 
-        c.includes('item') ||
-        c.includes('mansion') ||
-        c.includes('bukken') ||
-        c.includes('ms-') ||
-        c.includes('search')
-      );
-      console.warn(`  발견된 관련 클래스명: ${uniqueClasses.slice(0, 20).join(', ')}`);
-      
-      // HTML 샘플 저장 (디버깅용)
-      const bodyHTML = $('body').html()?.substring(0, 2000) || '';
-      console.warn(`  Body HTML 샘플 (처음 2000자):`);
-      console.warn(`  ${bodyHTML}...`);
-      
-      // 링크가 있는 요소 찾기 (맨션 상세 페이지 링크)
-      const linksWithMs = $('a[href*="/ms/"]');
-      console.warn(`  /ms/ 링크 발견: ${linksWithMs.length}개`);
-      if (linksWithMs.length > 0) {
-        const firstLink = linksWithMs.first();
-        const parentElement = firstLink.parent().parent();
-        console.warn(`  첫 번째 링크의 부모 요소 클래스: ${parentElement.attr('class') || '(없음)'}`);
-        console.warn(`  첫 번째 링크의 부모 요소 HTML 샘플: ${parentElement.html()?.substring(0, 500) || '(없음)'}`);
-      }
-      
-      return { mansions: [], nextPageUrl: null };
-    }
-
-    // SUUMO의 물건 목록 선택자 (실제 구조에 따라 수정 필요)
-    $(selectorUsed).each((_, element) => {
+    propertyLinks.each((_, element) => {
       try {
         const $el = $(element);
 
-        // SUUMO 실제 구조: .propertybox-object 내부 구조
-        // - .propertybox-title (제목/가격)
-        // - .propertybox-body 또는 다른 요소들 (주소, 면적 등)
-        
-        // 전체 텍스트에서 정보 추출
-        const allText = $el.text();
-        
-        // 제목과 링크 찾기
-        // propertybox-object 내부의 링크 찾기
-        const linkElement = $el.find('a[href*="/ms/"]').first();
-        const sourceUrl = linkElement.attr('href') || '';
-        
-        // 이름 추출 - propertybox-object의 구조 분석
-        // 실제 구조: propertybox-object > propertybox-body > propertybox-title 또는 직접 링크
-        let nameJa = '';
-        
-        // 방법 1: 링크 텍스트에서 추출
-        if (linkElement.length > 0) {
-          nameJa = linkElement.text().trim();
-        }
-        
-        // 방법 2: propertybox-title에서 추출 (가격이 아닌 부분)
-        if (!nameJa || nameJa.length < 3) {
-          const titleText = $el.find('.propertybox-title').text().trim();
-          // titleText에서 가격 부분 제거하고 나머지를 이름으로
-          const titleWithoutPrice = titleText.replace(/[0-9,]+[億万円台～～-]+/g, '').trim();
-          if (titleWithoutPrice.length > 3) {
-            nameJa = titleWithoutPrice;
-          }
-        }
-        
-        // 방법 3: 전체 텍스트에서 "NEW"로 시작하는 부분 찾기
-        if (!nameJa || nameJa.length < 3) {
-          const newMatch = allText.match(/NEW\s*([^\n\r\s]+(?:\s+[^\n\r\s]+)*)/);
-          if (newMatch && newMatch[1]) {
-            nameJa = newMatch[1].trim();
-          }
-        }
-        
-        // 방법 4: propertybox-object의 첫 번째 의미있는 텍스트 라인
-        if (!nameJa || nameJa.length < 3) {
-          const htmlContent = $el.html() || '';
-          // HTML에서 텍스트만 추출 (태그 제거)
-          const textLines = allText.split(/\n/).map(l => l.trim()).filter(l => 
-            l.length > 5 && 
-            !l.match(/[0-9,]+[億万円]/) && 
-            !l.includes('所在地') &&
-            !l.includes('交通')
-          );
-          if (textLines.length > 0) {
-            nameJa = textLines[0];
-          }
-        }
-        
-        // 이름 정리
-        nameJa = nameJa
-          .replace(/^NEW\s*/i, '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        
-        // propertybox-title에서 가격 정보 추출
-        const titleElement = $el.find('.propertybox-title').first();
-        const titleText = titleElement.text().trim();
-        
-        // 가격 - propertybox-title에서 추출 (이미 titleText에 있음)
-        const priceText = titleText || '';
-        
-        // 주소 - propertybox-object 내부에서 찾기
-        let addressJa = '';
-        // propertybox-body 또는 다른 요소에서 주소 찾기
-        $el.find('[class*="area"], [class*="address"], [class*="所在地"]').each((_, item) => {
-          const itemText = $(item).text();
-          if (itemText.includes('東京都') || itemText.includes('区') || itemText.includes('市')) {
-            addressJa = itemText.trim();
-            return false; // break
-          }
-        });
-        // 전체 텍스트에서 주소 패턴 찾기
-        if (!addressJa) {
-          const addressMatch = allText.match(/東京都[^\s]+/);
-          if (addressMatch) {
-            addressJa = addressMatch[0];
-          }
-        }
-        
-        // 면적 - m² 패턴 찾기
-        let areaText = '';
-        $el.find('[class*="menseki"], [class*="area"]').each((_, item) => {
-          const itemText = $(item).text();
-          if (itemText.includes('m²') || itemText.includes('㎡')) {
-            areaText = itemText;
-            return false; // break
-          }
-        });
-        if (!areaText) {
-          const areaMatch = allText.match(/[0-9.]+m²|[0-9.]+㎡/);
-          if (areaMatch) {
-            areaText = areaMatch[0];
-          }
-        }
-        
-        // 방 타입 - 1LDK, 2LDK 등 패턴 찾기
-        let layoutText = '';
-        $el.find('[class*="madori"], [class*="layout"]').each((_, item) => {
-          const itemText = $(item).text();
-          if (/[0-9]+[RLDK]/.test(itemText)) {
-            layoutText = itemText;
-            return false; // break
-          }
-        });
-        if (!layoutText) {
-          const layoutMatch = allText.match(/[0-9]+[RLDK]+/g);
-          if (layoutMatch) {
-            layoutText = layoutMatch.join('・');
-          }
-        }
-        
-        // 교통 정보 - 駅, 徒歩 패턴 찾기
-        let accessText = '';
-        $el.find('[class*="traffic"], [class*="access"]').each((_, item) => {
-          const itemText = $(item).text();
-          if (itemText.includes('駅') || itemText.includes('徒歩')) {
-            accessText = itemText;
-            return false; // break
-          }
-        });
-        if (!accessText) {
-          const accessMatch = allText.match(/[^\s]+線[^\s]*駅[^\s]*徒歩[0-9]+分/g);
-          if (accessMatch) {
-            accessText = accessMatch.join(' / ');
-          }
-        }
-        
-        // 완공 예정 - 年, 月 패턴 찾기
-        let completionText = '';
-        $el.find('[class*="shunkou"], [class*="completion"]').each((_, item) => {
-          const itemText = $(item).text();
-          if (itemText.includes('年') && itemText.includes('月')) {
-            completionText = itemText;
-            return false; // break
-          }
-        });
-        if (!completionText) {
-          const completionMatch = allText.match(/[0-9]{4}年[0-9]{1,2}月/);
-          if (completionMatch) {
-            completionText = completionMatch[0];
-          }
-        }
-        
-        // 총 세대수 - 戸 패턴 찾기
-        let totalUnitsText = '';
-        $el.find('[class*="souko"], [class*="units"]').each((_, item) => {
-          const itemText = $(item).text();
-          if (itemText.includes('戸')) {
-            totalUnitsText = itemText;
-            return false; // break
-          }
-        });
-        if (!totalUnitsText) {
-          const unitsMatch = allText.match(/([0-9,]+)戸/);
-          if (unitsMatch) {
-            totalUnitsText = unitsMatch[0];
-          }
-        }
-        
+        // 링크 URL
+        const href = $el.attr('href') || '';
+        if (!href || !href.includes('/ms/shinchiku/')) return;
+
+        const sourceUrl = href.startsWith('http') ? href : `${SUUMO_BASE_URL}${href}`;
+
+        // 맨션 이름 (.propertybox-title에서 추출)
+        const titleEl = $el.find('.propertybox-title');
+        let name = titleEl.text().trim();
+        // NEW 라벨 제거
+        name = name.replace(/^NEW\s*/i, '').trim();
+
+        // 가격 (.propertybox-emphasize에서 추출)
+        const price = $el.find('.propertybox-emphasize').text().trim();
+
+        // 교통 정보 (.propertybox-desc에서 추출)
+        const access = $el.find('.propertybox-desc').text().trim();
+
         // 썸네일 이미지
-        const thumbnailUrl = 
-          $el.find('[class*="image"] img').first().attr('src') ||
-          $el.find('img').first().attr('src') ||
-          '';
-        
-        // sourceUrl이 상대 경로인 경우 절대 경로로 변환
-        const fullSourceUrl = sourceUrl 
-          ? (sourceUrl.startsWith('http') ? sourceUrl : `${SUUMO_BASE_URL}${sourceUrl}`)
-          : '';
+        const thumbnailUrl = $el.find('img').first().attr('src') || '';
 
-        // 가격 범위 파싱 (億円, 万円 모두 처리)
-        // "1億7380万円", "6億円", "6780万円～8990万円" 등 다양한 형식 지원
-        let priceValues: number[] = [];
-        
-        // 億円 + 万円 조합 (예: "1億7380万円")
-        const okuManMatch = priceText.match(/([0-9,]+)億([0-9,]+)万円/);
-        if (okuManMatch) {
-          const oku = parseInt(okuManMatch[1].replace(/,/g, ''), 10) * 10000;
-          const man = parseInt(okuManMatch[2].replace(/,/g, ''), 10);
-          priceValues.push(oku + man);
-        }
-        
-        // 億円만 (예: "6億円")
-        const okuOnlyMatches = priceText.match(/([0-9,]+)億円/g);
-        if (okuOnlyMatches) {
-          okuOnlyMatches.forEach(match => {
-            const oku = parseInt(match.replace(/億円/g, '').replace(/,/g, ''), 10) * 10000;
-            priceValues.push(oku);
-          });
-        }
-        
-        // 万円만 (예: "6780万円", "6780万円～8990万円")
-        const manMatches = priceText.match(/([0-9,]+)万円/g);
-        if (manMatches) {
-          manMatches.forEach(match => {
-            const man = parseInt(match.replace(/万円/g, '').replace(/,/g, ''), 10);
-            priceValues.push(man);
-          });
-        }
-        
-        // 범위 표시가 있는 경우 (예: "6780万円～8990万円")
-        if (priceValues.length === 0) {
-          // parsePrice 함수 사용 (이미 億円, 万円 처리 가능)
-          const singlePrice = parsePrice(priceText);
-          if (singlePrice > 0) {
-            priceValues.push(singlePrice);
-          }
-        }
-        
-        const priceMin = priceValues.length > 0 ? Math.min(...priceValues) : 0;
-        const priceMax = priceValues.length > 0 ? Math.max(...priceValues) : priceMin;
-        
-        // 가격 단위 결정
-        const priceUnit: '万円' | '億円' = priceMax >= 10000 ? '億円' : '万円';
-
-        // 면적 범위 파싱
-        const areas = areaText.match(/([0-9.]+)m²/g) || [];
-        const areaValues = areas.map(parseArea);
-        const areaMin = Math.min(...areaValues) || 0;
-        const areaMax = Math.max(...areaValues) || areaMin;
-
-        // 방 타입 파싱
-        const layoutTypes = layoutText.match(/\d+[LKDR]+|\dR/g) || [];
-
-        // 총 세대수 파싱
-        const totalUnitsMatch = totalUnitsText.match(/(\d+)戸/);
-        const totalUnits = totalUnitsMatch ? parseInt(totalUnitsMatch[1], 10) : 0;
-
-        // 교통 정보 파싱
-        const stations = parseStationAccess(accessText);
-
-        // 디버깅: 파싱된 데이터 확인 (처음 3개만)
-        if (mansions.length < 3) {
-          console.log(`  샘플 데이터 파싱 (${mansions.length + 1}번째):`);
-          console.log(`    이름: ${nameJa || '(없음)'}`);
-          console.log(`    주소: ${addressJa || '(없음)'}`);
-          console.log(`    가격: ${priceText || '(없음)'}`);
-          console.log(`    면적: ${areaText || '(없음)'}`);
-          console.log(`    링크: ${sourceUrl || '(없음)'}`);
-          
-          // 데이터가 없으면 HTML 구조 확인
-          if (!nameJa && !addressJa && mansions.length === 0) {
-            console.log(`    전체 텍스트 샘플: ${$el.text().substring(0, 200)}...`);
-            console.log(`    클래스명: ${$el.attr('class') || '(없음)'}`);
-          }
-        }
-
-        if (nameJa && addressJa) {
-          mansions.push({
-            id: generateId(nameJa, addressJa),
-            name: nameJa,
-            nameJa,
-            address: addressJa,
-            addressJa,
-            latitude: 0, // 추후 지오코딩 필요
-            longitude: 0,
-            priceMin,
-            priceMax,
-            priceUnit,
-            areaMin,
-            areaMax,
-            layoutTypes: [...new Set(layoutTypes)],
-            totalUnits,
-            floors: 0,
-            completion: completionText,
-            developer: '',
-            stations,
-            thumbnailUrl: thumbnailUrl || '',
-            imageUrls: [],
-            sourceUrl: sourceUrl ? `${SUUMO_BASE_URL}${sourceUrl}` : '',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
+        if (name && name.length > 2) {
+          mansionInfos.push({
+            name,
+            price,
+            access,
+            sourceUrl,
+            thumbnailUrl,
           });
         }
       } catch (err) {
-        console.error('Error parsing mansion element:', err);
+        console.error('  요소 파싱 오류:', err);
       }
     });
 
-    console.log(`  파싱 완료: ${mansions.length}개 맨션 발견`);
+    // 중복 제거 (같은 URL)
+    const uniqueInfos = mansionInfos.filter((info, index, self) =>
+      index === self.findIndex(t => t.sourceUrl === info.sourceUrl)
+    );
 
-    // 다음 페이지 URL 파싱
-    const nextPageLink = 
-      $('.pager .pager-next a').attr('href') ||
-      $('[class*="pager"] [class*="next"] a').attr('href') ||
-      $('a[href*="page="]').last().attr('href') ||
+    console.log(`  기본 정보 추출: ${uniqueInfos.length}개 (중복 제거 후)`);
+
+    // 다음 페이지 URL
+    const nextPageLink = $('a[href*="page="]').filter((_, el) => {
+      return $(el).text().includes('次へ') || $(el).hasClass('pagination_set-next');
+    }).first().attr('href');
+
+    const nextPageUrl = nextPageLink ?
+      (nextPageLink.startsWith('http') ? nextPageLink : `${SUUMO_BASE_URL}${nextPageLink}`) :
       null;
-    const nextPageUrl = nextPageLink ? `${SUUMO_BASE_URL}${nextPageLink}` : null;
+
+    // 상세 페이지에서 추가 정보 가져오기
+    const mansions: Partial<Mansion>[] = [];
+
+    for (let i = 0; i < uniqueInfos.length; i++) {
+      const info = uniqueInfos[i];
+      console.log(`  [${i + 1}/${uniqueInfos.length}] 상세 정보 크롤링: ${info.name}`);
+
+      try {
+        const detailData = await scrapeDetailPage(info.sourceUrl);
+
+        // 가격 파싱
+        const priceValue = parsePrice(info.price);
+        const priceUnit: '万円' | '億円' = priceValue >= 10000 ? '億円' : '万円';
+
+        // 교통 정보 파싱
+        const stations = parseStationAccess(info.access);
+        if (stations.length === 0 && detailData.access) {
+          stations.push(...parseStationAccess(detailData.access));
+        }
+
+        // 주소가 없으면 역 정보로 대체 (지오코딩용)
+        const address = detailData.address || `東京都 ${info.access.split('/')[1]?.split(' ')[0] || ''}`;
+
+        mansions.push({
+          id: generateId(info.name, info.sourceUrl),
+          name: info.name,
+          nameJa: info.name,
+          address: address,
+          addressJa: address,
+          ward: detailData.ward || extractWard(address),
+          latitude: 0,
+          longitude: 0,
+          priceMin: priceValue,
+          priceMax: priceValue,
+          priceUnit,
+          areaMin: detailData.areaMin || 0,
+          areaMax: detailData.areaMax || 0,
+          layoutTypes: detailData.layoutTypes || [],
+          totalUnits: detailData.totalUnits || 0,
+          floors: detailData.floors || 0,
+          completion: detailData.completion || '',
+          developer: detailData.developer || '',
+          stations,
+          thumbnailUrl: info.thumbnailUrl,
+          imageUrls: detailData.imageUrls || [],
+          sourceUrl: info.sourceUrl,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+
+        // Rate limiting
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      } catch (err) {
+        console.error(`  상세 페이지 오류 (${info.name}):`, err);
+      }
+    }
 
     return { mansions, nextPageUrl };
   } catch (error) {
-    console.error('Error scraping SUUMO:', error);
+    console.error('목록 페이지 스크래핑 오류:', error);
     return { mansions: [], nextPageUrl: null };
   }
 };
 
+// 구 이름 추출
+const extractWard = (address: string): string => {
+  const wardMatch = address.match(/(千代田|中央|港|新宿|文京|台東|墨田|江東|品川|目黒|大田|世田谷|渋谷|中野|杉並|豊島|北|荒川|板橋|練馬|足立|葛飾|江戸川)区/);
+  return wardMatch ? `${wardMatch[1]}区` : '';
+};
+
+// 상세 페이지에서 추가 정보 추출
+interface DetailData {
+  address: string;
+  ward: string;
+  areaMin: number;
+  areaMax: number;
+  layoutTypes: string[];
+  totalUnits: number;
+  floors: number;
+  completion: string;
+  developer: string;
+  access: string;
+  imageUrls: string[];
+}
+
+const scrapeDetailPage = async (url: string): Promise<DetailData> => {
+  const result: DetailData = {
+    address: '',
+    ward: '',
+    areaMin: 0,
+    areaMax: 0,
+    layoutTypes: [],
+    totalUnits: 0,
+    floors: 0,
+    completion: '',
+    developer: '',
+    access: '',
+    imageUrls: [],
+  };
+
+  try {
+    const html = await loadPageWithPuppeteer(url);
+    const $ = cheerio.load(html);
+
+    // GTM 스크립트에서 데이터 추출 시도 (가장 정확한 정보)
+    const scriptContent = $('script').filter((_, el) => {
+      return $(el).html()?.includes('gapSuumoPcForKr') || false;
+    }).first().html() || '';
+
+    if (scriptContent) {
+      try {
+        // gapSuumoPcForKr 객체 추출
+        const match = scriptContent.match(/gapSuumoPcForKr\s*=\s*\[([\s\S]*?)\];/);
+        if (match) {
+          // JSON 파싱을 위한 정리
+          let jsonStr = match[1].trim();
+          // JavaScript 객체를 JSON으로 변환 (키에 따옴표 추가)
+          jsonStr = jsonStr.replace(/(\w+)\s*:/g, '"$1":');
+          jsonStr = jsonStr.replace(/'/g, '"');
+
+          const data = JSON.parse(`[${jsonStr}]`)[0];
+
+          if (data) {
+            // 주소
+            result.address = `東京都${data.todofukenNm || ''}${data.shikugunNm || ''}`;
+            result.ward = data.shikugunNm || '';
+
+            // 면적
+            if (data.senyuMensekiDisp && data.senyuMensekiDisp[0]) {
+              const areas = data.senyuMensekiDisp.map((a: string) => parseFloat(a) || 0).filter((a: number) => a > 0);
+              result.areaMin = Math.min(...areas) || 0;
+              result.areaMax = Math.max(...areas) || 0;
+            }
+
+            // 간취り
+            if (data.madoriDisp) {
+              result.layoutTypes = data.madoriDisp.filter((m: string) => m && m.length > 0);
+            }
+
+            // 총 세대수
+            if (data.soKukakusuDisp) {
+              result.totalUnits = parseInt(data.soKukakusuDisp, 10) || 0;
+            }
+
+            // 완공 예정
+            if (data.kanseiDateDisp) {
+              const year = data.kanseiDateDisp.substring(0, 4);
+              const month = data.kanseiDateDisp.substring(4, 6);
+              result.completion = `${year}年${parseInt(month, 10)}月`;
+            }
+
+            // 교통 정보
+            if (data.ensenNm1 && data.ekiNm1) {
+              result.access = `${data.ensenNm1}/${data.ekiNm1} 徒歩${data.tohoJikan1 || '?'}分`;
+            }
+          }
+        }
+      } catch (parseErr) {
+        console.log('    GTM 데이터 파싱 실패, HTML에서 추출 시도');
+      }
+    }
+
+    // HTML에서 직접 추출 (GTM 실패 시 또는 보완)
+    if (!result.address) {
+      // 소재지 찾기
+      $('th, dt').each((_, el) => {
+        const label = $(el).text().trim();
+        if (label.includes('所在地') || label.includes('住所')) {
+          const value = $(el).next('td, dd').text().trim();
+          if (value.includes('東京都')) {
+            result.address = value.split('\n')[0].trim();
+            result.ward = extractWard(result.address);
+          }
+        }
+      });
+    }
+
+    // 면적 (HTML)
+    if (result.areaMin === 0) {
+      const areaMatches = $('body').text().match(/([0-9.]+)\s*m²/g) || [];
+      const areas = areaMatches.map(m => parseFloat(m) || 0).filter(a => a > 20 && a < 500);
+      if (areas.length > 0) {
+        result.areaMin = Math.min(...areas);
+        result.areaMax = Math.max(...areas);
+      }
+    }
+
+    // 간취り (HTML)
+    if (result.layoutTypes.length === 0) {
+      const layoutMatches = $('body').text().match(/[1-4][SLDK]+/g) || [];
+      result.layoutTypes = [...new Set(layoutMatches)];
+    }
+
+    // 이미지 URL
+    $('img[src*="suumo.com"]').each((_, el) => {
+      const src = $(el).attr('src');
+      if (src && src.includes('bukken') && !src.includes('resize')) {
+        result.imageUrls.push(src);
+      }
+    });
+
+  } catch (error) {
+    console.error('  상세 페이지 오류:', error);
+  }
+
+  return result;
+};
+
 // 지오코딩 (주소 -> 좌표 변환)
+// Nominatim 사용 정책: 최대 1 request/second
 export const geocodeAddress = async (
-  address: string
+  address: string,
+  retryCount: number = 0
 ): Promise<{ lat: number; lng: number } | null> => {
   try {
-    // 일본 주소용 지오코딩 API 사용 (예: Yahoo! Japan Local Search API)
-    // 무료 대안으로 OpenStreetMap Nominatim 사용 가능
-    const encodedAddress = encodeURIComponent(address);
+    // 주소 정규화: "東京都東京都" 같은 중복 제거
+    let cleanAddress = address.replace(/東京都東京都/g, '東京都');
+
+    const encodedAddress = encodeURIComponent(cleanAddress);
     const response = await axios.get(
-      `https://nominatim.openstreetmap.org/search?q=${encodedAddress}&format=json&limit=1`,
+      `https://nominatim.openstreetmap.org/search?q=${encodedAddress}&format=json&limit=1&countrycodes=jp`,
       {
         headers: {
-          'User-Agent': 'TokyoMansionSearchApp/1.0',
+          'User-Agent': 'TokyoMansionSearchApp/1.0 (mansion search project)',
         },
+        timeout: 15000,
       }
     );
 
@@ -624,43 +449,74 @@ export const geocodeAddress = async (
       };
     }
     return null;
-  } catch (error) {
-    console.error('Geocoding error:', error);
+  } catch (error: any) {
+    // 503/429 에러시 재시도 (rate limiting)
+    if ((error.response?.status === 503 || error.response?.status === 429) && retryCount < 3) {
+      const waitTime = (retryCount + 1) * 5000; // 5초, 10초, 15초 대기
+      console.log(`    ⏳ Rate limit 도달, ${waitTime / 1000}초 대기 후 재시도...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      return geocodeAddress(address, retryCount + 1);
+    }
+
+    // 그 외 에러는 무시하고 null 반환 (DB 저장은 계속 진행)
+    const statusCode = error.response?.status || 'unknown';
+    console.log(`    지오코딩 실패 (status: ${statusCode})`);
     return null;
   }
 };
 
 // 전체 크롤링 프로세스
 export const crawlSuumoMansions = async (
-  maxPages: number = 5
+  maxPages: number = 3
 ): Promise<Mansion[]> => {
   const allMansions: Partial<Mansion>[] = [];
   let currentUrl: string | null = `${SUUMO_BASE_URL}${SUUMO_TOKYO_NEW_MANSION}`;
   let pageCount = 0;
 
-  while (currentUrl && pageCount < maxPages) {
-    console.log(`Scraping page ${pageCount + 1}: ${currentUrl}`);
-    const { mansions, nextPageUrl } = await scrapeSuumoListPage(currentUrl);
-    allMansions.push(...mansions);
-    currentUrl = nextPageUrl;
-    pageCount++;
+  console.log('🚀 SUUMO 크롤링 시작...\n');
 
-    // Rate limiting - 요청 사이에 딜레이
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-  }
+  try {
+    while (currentUrl && pageCount < maxPages) {
+      console.log(`\n📄 페이지 ${pageCount + 1}/${maxPages}: ${currentUrl}`);
 
-  // 지오코딩 수행
-  console.log('Geocoding addresses...');
-  for (const mansion of allMansions) {
-    if (mansion.addressJa && (!mansion.latitude || !mansion.longitude)) {
-      const coords = await geocodeAddress(mansion.addressJa);
-      if (coords) {
-        mansion.latitude = coords.lat;
-        mansion.longitude = coords.lng;
+      const { mansions, nextPageUrl } = await scrapeSuumoListPage(currentUrl);
+      allMansions.push(...mansions);
+
+      console.log(`  ✓ ${mansions.length}개 맨션 추출 (총 ${allMansions.length}개)`);
+
+      currentUrl = nextPageUrl;
+      pageCount++;
+
+      if (currentUrl) {
+        console.log('  ⏳ 다음 페이지 대기 중...');
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
-      // Rate limiting for geocoding
-      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
+
+    // 지오코딩 수행
+    console.log('\n🌍 지오코딩 시작...');
+    let geocodedCount = 0;
+
+    for (const mansion of allMansions) {
+      if (mansion.addressJa && (!mansion.latitude || mansion.latitude === 0)) {
+        const coords = await geocodeAddress(mansion.addressJa);
+        if (coords) {
+          mansion.latitude = coords.lat;
+          mansion.longitude = coords.lng;
+          geocodedCount++;
+          console.log(`  ✓ ${mansion.name}: (${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)})`);
+        } else {
+          console.log(`  ✗ ${mansion.name}: 좌표 찾기 실패`);
+        }
+        // Nominatim rate limit: 1 request/second + 여유
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
+    }
+
+    console.log(`\n✅ 지오코딩 완료: ${geocodedCount}/${allMansions.length}개`);
+
+  } finally {
+    await closeBrowser();
   }
 
   return allMansions as Mansion[];
