@@ -25,6 +25,8 @@ const parseQueryParams = (event: HandlerEvent): { filter: SearchFilter; bounds?:
   if (params.layoutTypes) {
     filter.layoutTypes = params.layoutTypes.split(',');
   }
+  if (params.totalUnitsMin) filter.totalUnitsMin = Number(params.totalUnitsMin);
+  if (params.totalUnitsMax) filter.totalUnitsMax = Number(params.totalUnitsMax);
 
   let bounds: MapBounds | undefined;
   if (params.neLat && params.neLng && params.swLat && params.swLng) {

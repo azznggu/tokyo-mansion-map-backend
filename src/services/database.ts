@@ -71,6 +71,8 @@ export const fetchMansionsFromDB = async (
     layoutTypes?: string[];
     walkMinutesMax?: number;
     ward?: string;
+    totalUnitsMin?: number;
+    totalUnitsMax?: number;
   },
   bounds?: {
     neLat: number;
@@ -116,9 +118,19 @@ export const fetchMansionsFromDB = async (
       query = query.eq('ward', filter.ward);
     }
 
-    // 지도 영역 필터
+    // 총호수 필터
+    if (filter.totalUnitsMin !== undefined) {
+      query = query.gte('total_units', filter.totalUnitsMin);
+    }
+    if (filter.totalUnitsMax !== undefined) {
+      query = query.lte('total_units', filter.totalUnitsMax);
+    }
+
+    // 지도 영역 필터 - 유효한 좌표가 있는 데이터만 (latitude > 0, longitude > 0)
     if (bounds) {
       query = query
+        .gt('latitude', 0)
+        .gt('longitude', 0)
         .gte('latitude', bounds.swLat)
         .lte('latitude', bounds.neLat)
         .gte('longitude', bounds.swLng)
@@ -202,6 +214,8 @@ export const fetchMansionsInBoundsFromDB = async (
     layoutTypes?: string[];
     walkMinutesMax?: number;
     ward?: string;
+    totalUnitsMin?: number;
+    totalUnitsMax?: number;
   },
   bounds: {
     neLat: number;
@@ -213,11 +227,13 @@ export const fetchMansionsInBoundsFromDB = async (
   try {
     const supabase = getSupabaseClient();
 
-    // 기본 쿼리
+    // 기본 쿼리 - 유효한 좌표가 있는 데이터만 (latitude > 0, longitude > 0)
     let query = supabase
       .from('mansions')
       .select('*')
       .eq('is_active', true)
+      .gt('latitude', 0)
+      .gt('longitude', 0)
       .gte('latitude', bounds.swLat)
       .lte('latitude', bounds.neLat)
       .gte('longitude', bounds.swLng)
@@ -247,6 +263,14 @@ export const fetchMansionsInBoundsFromDB = async (
     // 구 필터
     if (filter.ward) {
       query = query.eq('ward', filter.ward);
+    }
+
+    // 총호수 필터
+    if (filter.totalUnitsMin !== undefined) {
+      query = query.gte('total_units', filter.totalUnitsMin);
+    }
+    if (filter.totalUnitsMax !== undefined) {
+      query = query.lte('total_units', filter.totalUnitsMax);
     }
 
     // 정렬

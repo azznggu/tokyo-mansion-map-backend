@@ -56,6 +56,8 @@ export interface SearchFilter {
   walkMinutesMax?: number;
   ward?: string;
   completionYear?: number;
+  totalUnitsMin?: number;
+  totalUnitsMax?: number;
 }
 
 export interface MapBounds {
